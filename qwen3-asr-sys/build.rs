@@ -61,6 +61,16 @@ fn main() {
     );
     println!("cargo:warning=qwen3-asr-sys: {}", gpu_summary);
 
+    // ── 0.5. Patch ggml-metal to not abort on GPU errors ────────────────
+    // Upstream ggml calls GGML_ABORT (== abort()) when a Metal command buffer
+    // fails in ggml_metal_synchronize. This kills the entire process instead
+    // of propagating the error. We patch the source before cmake builds it
+    // so that failures set a flag checked by ggml_metal_graph_compute, which
+    // already returns GGML_STATUS_FAILED in other code paths.
+    if use_metal {
+        patch_ggml_metal_no_abort(&ggml_root);
+    }
+
     // ── 1. Build GGML via cmake ───────────────────────────────────────────
     let mut ggml_cfg = cmake::Config::new(&ggml_root);
 
@@ -956,6 +966,132 @@ fn download_cuda_linux(cache: &Path) -> Option<CudaToolkit> {
 
     println!("cargo:warning=qwen3-asr-sys: automatic CUDA download/install failed");
     None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ggml-metal abort patch
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Patch `ggml-metal-context.m` so that Metal command buffer failures in
+/// `ggml_metal_synchronize` set a flag instead of calling `GGML_ABORT`.
+/// The flag is checked at the top of `ggml_metal_graph_compute` which returns
+/// `GGML_STATUS_FAILED` — matching the existing error-return path used during
+/// GPU capture mode.
+///
+/// This prevents the entire process from being killed by a transient GPU error
+/// (e.g. memory pressure, shader compilation failure) and lets the Rust caller
+/// handle the error gracefully.
+fn patch_ggml_metal_no_abort(ggml_root: &Path) {
+    let file = ggml_root.join("src/ggml-metal/ggml-metal-context.m");
+    if !file.exists() {
+        println!("cargo:warning=qwen3-asr-sys: ggml-metal-context.m not found, skipping patch");
+        return;
+    }
+
+    let original = match std::fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("cargo:warning=qwen3-asr-sys: failed to read ggml-metal-context.m: {}", e);
+            return;
+        }
+    };
+
+    // Don't re-patch if already applied
+    if original.contains("synchronize_failed") {
+        println!("cargo:warning=qwen3-asr-sys: ggml-metal patch already applied");
+        return;
+    }
+
+    // Process line by line for reliable matching
+    let lines: Vec<&str> = original.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 20);
+    let mut patches_applied = 0u32;
+    // Track which GGML_ABORT we're replacing (1st = main cmd_bufs, 2nd = ext cmd_bufs)
+    // Only patch the ones inside ggml_metal_synchronize
+    let mut in_synchronize = false;
+    let mut abort_count_in_sync = 0u32;
+
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        // Track when we enter/leave ggml_metal_synchronize
+        if trimmed.starts_with("void ggml_metal_synchronize(") {
+            in_synchronize = true;
+            abort_count_in_sync = 0;
+        }
+        // Detect end of function (closing brace at column 0 after we're in synchronize)
+        if in_synchronize && line == "}" {
+            in_synchronize = false;
+        }
+
+        // Patch 1: Add synchronize_failed field to struct
+        if trimmed == "void *              abort_callback_data;"
+            && i + 1 < lines.len()
+            && lines[i + 1].trim() == "};"
+        {
+            out.push(line.to_string());
+            out.push(String::new());
+            out.push("    // set by ggml_metal_synchronize when a command buffer fails, checked by graph_compute".to_string());
+            out.push("    bool synchronize_failed;".to_string());
+            patches_applied += 1;
+            i += 1;
+            continue;
+        }
+
+        // Patch 2 & 3: Replace GGML_ABORT("fatal error") inside ggml_metal_synchronize
+        if in_synchronize && trimmed == r#"GGML_ABORT("fatal error");"# {
+            abort_count_in_sync += 1;
+            if abort_count_in_sync == 1 {
+                // First abort (main cmd_bufs loop): simple flag + return
+                out.push("                ctx->synchronize_failed = true;".to_string());
+                out.push("                return;".to_string());
+                patches_applied += 1;
+            } else if abort_count_in_sync == 2 {
+                // Second abort (ext cmd_bufs loop): cleanup + flag + return
+                out.push("                // release already-checked ext buffers before returning".to_string());
+                out.push("                for (size_t j = 0; j < i; ++j) {".to_string());
+                out.push("                    [ctx->cmd_bufs_ext[j] release];".to_string());
+                out.push("                }".to_string());
+                out.push("                [ctx->cmd_bufs_ext removeAllObjects];".to_string());
+                out.push("                ctx->synchronize_failed = true;".to_string());
+                out.push("                return;".to_string());
+                patches_applied += 1;
+            } else {
+                // Unexpected extra abort — leave as-is
+                out.push(line.to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        // Patch 4: Add flag check at top of ggml_metal_graph_compute
+        if trimmed.starts_with("enum ggml_status ggml_metal_graph_compute(") {
+            out.push(line.to_string());
+            out.push("    // if a previous synchronize detected a command buffer failure, propagate the error".to_string());
+            out.push("    if (ctx->synchronize_failed) {".to_string());
+            out.push(r#"        GGML_LOG_ERROR("%s: previous Metal command buffer failure detected, returning GGML_STATUS_FAILED\n", __func__);"#.to_string());
+            out.push("        ctx->synchronize_failed = false;".to_string());
+            out.push("        return GGML_STATUS_FAILED;".to_string());
+            out.push("    }".to_string());
+            out.push(String::new());
+            patches_applied += 1;
+            i += 1;
+            continue;
+        }
+
+        out.push(line.to_string());
+        i += 1;
+    }
+
+    if patches_applied >= 4 {
+        let patched = out.join("\n") + "\n";
+        std::fs::write(&file, patched).expect("failed to write patched ggml-metal-context.m");
+        println!("cargo:warning=qwen3-asr-sys: patched ggml-metal-context.m ({} patches applied — no-abort on GPU error)", patches_applied);
+    } else {
+        println!("cargo:warning=qwen3-asr-sys: ggml-metal patch only matched {}/4 locations (upstream may have changed)", patches_applied);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
