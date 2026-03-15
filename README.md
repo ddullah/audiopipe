@@ -89,14 +89,17 @@ audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", features = ["
 ## Examples
 
 ```sh
-# Transcribe with GGML Qwen3-ASR
-cargo run --example test_ggml --features qwen3-asr-ggml -- audio.wav
+# Transcribe with GGML Qwen3-ASR (model auto-downloads from HuggingFace)
+cargo run --release --example test_ggml --features qwen3-asr-ggml -- audio.wav
+
+# Use quantized model (smaller, faster on CPU)
+cargo run --release --example test_ggml --features qwen3-asr-ggml -- audio.wav qwen3-asr-0.6b-ggml-q8
 
 # Transcribe with Parakeet
-cargo run --example transcribe --features parakeet -- audio.wav
+cargo run --release --example transcribe --features parakeet -- audio.wav
 
 # Benchmark
-cargo run --example benchmark --features qwen3-asr-ggml --release
+cargo run --release --example benchmark --features qwen3-asr-ggml
 ```
 
 ## Used by
