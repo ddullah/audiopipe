@@ -32,6 +32,15 @@ Pure C implementation by [antirez](https://github.com/antirez/qwen-asr). Faster-
 audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", features = ["qwen3-asr-antirez"] }
 ```
 
+For best CPU performance on Windows/Linux, enable OpenBLAS (`~10x faster` matmul):
+
+```toml
+[dependencies]
+audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", features = ["qwen3-asr-antirez-blas"] }
+```
+
+On Windows/Linux, download [pre-built OpenBLAS](https://github.com/OpenMathLib/OpenBLAS/releases) and set `OPENBLAS_PATH` to the extracted directory (e.g. `C:\OpenBLAS\win64`). On macOS, Accelerate is used automatically.
+
 ### Qwen3-ASR GGML
 
 Best balance of speed, accuracy, and language coverage. Uses GGML backend with native GPU support.
@@ -86,6 +95,7 @@ audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", features = ["
 | Feature | Description |
 |---------|-------------|
 | `qwen3-asr-antirez` | Qwen3-ASR pure C (fastest CPU) |
+| `qwen3-asr-antirez-blas` | Above + OpenBLAS for ~10x faster matmul |
 | `qwen3-asr-ggml` | Qwen3-ASR via GGML |
 | `qwen3-asr` | Qwen3-ASR via ONNX Runtime |
 | `parakeet` | NVIDIA Parakeet TDT via ONNX Runtime |
@@ -111,6 +121,9 @@ cargo run --release --example transcribe --features parakeet -- audio.wav
 
 # Benchmark antirez/qwen-asr (pure C, fast CPU)
 cargo run --release --example bench_asr --features qwen3-asr-antirez -- audio.wav
+
+# Benchmark with OpenBLAS (fastest on Windows/Linux)
+cargo run --release --example bench_asr --features qwen3-asr-antirez-blas -- audio.wav
 
 # Benchmark
 cargo run --release --example benchmark --features qwen3-asr-ggml

@@ -65,6 +65,7 @@ parakeet = ["onnx-deps"]
 qwen3-asr = ["onnx-deps"]
 qwen3-asr-ggml = ["dep:qwen3-asr-sys"]
 qwen3-asr-antirez = ["dep:antirez-asr-sys"]
+qwen3-asr-antirez-blas = ["qwen3-asr-antirez", "antirez-asr-sys/openblas"]
 all-models = ["whisper", "parakeet", "qwen3-asr"]
 
 # GGML GPU backends

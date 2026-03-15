@@ -40,9 +40,18 @@ fn main() {
         build.flag("-std=c11");
     }
 
+    let use_openblas = std::env::var("CARGO_FEATURE_OPENBLAS").is_ok();
+    let openblas_path = std::env::var("OPENBLAS_PATH").ok().map(std::path::PathBuf::from);
+
     if is_macos {
         build.define("USE_BLAS", None);
         build.define("ACCELERATE_NEW_LAPACK", None);
+    } else if use_openblas {
+        build.define("USE_BLAS", None);
+        build.define("USE_OPENBLAS", None);
+        if let Some(ref p) = openblas_path {
+            build.include(p.join("include"));
+        }
     }
 
     build.compile("antirez_asr");
@@ -66,6 +75,14 @@ fn main() {
             avx_build.flag("-mavx2").flag("-mfma");
         }
 
+        if use_openblas {
+            avx_build.define("USE_BLAS", None);
+            avx_build.define("USE_OPENBLAS", None);
+            if let Some(ref p) = openblas_path {
+                avx_build.include(p.join("include"));
+            }
+        }
+
         avx_build.compile("antirez_asr_avx");
     }
 
@@ -85,6 +102,11 @@ fn main() {
 
     if is_macos {
         println!("cargo:rustc-link-lib=framework=Accelerate");
+    } else if use_openblas {
+        if let Some(ref p) = openblas_path {
+            println!("cargo:rustc-link-search=native={}", p.join("lib").display());
+        }
+        println!("cargo:rustc-link-lib=dylib=libopenblas");
     }
 
     println!("cargo:rerun-if-changed=qwen-asr/");
