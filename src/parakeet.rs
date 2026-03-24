@@ -59,12 +59,10 @@ impl ParakeetEngine {
         let vocab_size = vocab.len();
 
         tracing::info!("loading encoder from {}", encoder_path.display());
-        let encoder = Session::builder()?
-            .commit_from_file(&encoder_path)?;
+        let encoder = build_session_with_ep(&encoder_path)?;
 
         tracing::info!("loading decoder from {}", decoder_path.display());
-        let decoder = Session::builder()?
-            .commit_from_file(&decoder_path)?;
+        let decoder = build_session_with_ep(&decoder_path)?;
 
         tracing::info!("parakeet loaded: vocab_size={}", vocab_size);
 
@@ -76,6 +74,58 @@ impl ParakeetEngine {
             name: "parakeet".to_string(),
         })
     }
+}
+
+/// Build an ONNX session with the best available execution provider.
+/// CoreML on macOS (ANE + GPU + CPU), DirectML on Windows, CPU fallback.
+fn build_session_with_ep(onnx_path: &std::path::Path) -> Result<Session> {
+    let file_name = onnx_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+    // --- CoreML (macOS) ---
+    #[cfg(feature = "coreml")]
+    {
+        use ort::CoreMLExecutionProvider;
+        let ep = CoreMLExecutionProvider::default();
+        tracing::info!("parakeet: trying CoreML EP for {}", file_name);
+
+        match Session::builder()
+            .and_then(|b| b.with_execution_providers([ep.into()]))
+            .and_then(|b| b.commit_from_file(onnx_path))
+        {
+            Ok(session) => {
+                tracing::info!("parakeet: {} loaded with CoreML", file_name);
+                return Ok(session);
+            }
+            Err(e) => {
+                tracing::warn!("parakeet: CoreML failed for {}: {}, falling back", file_name, e);
+            }
+        }
+    }
+
+    // --- DirectML (Windows) ---
+    #[cfg(feature = "directml")]
+    {
+        use ort::DirectMLExecutionProvider;
+        let ep = DirectMLExecutionProvider::default();
+        tracing::info!("parakeet: trying DirectML EP for {}", file_name);
+
+        match Session::builder()
+            .and_then(|b| b.with_execution_providers([ep.into()]))
+            .and_then(|b| b.commit_from_file(onnx_path))
+        {
+            Ok(session) => {
+                tracing::info!("parakeet: {} loaded with DirectML", file_name);
+                return Ok(session);
+            }
+            Err(e) => {
+                tracing::warn!("parakeet: DirectML failed for {}: {}, falling back", file_name, e);
+            }
+        }
+    }
+
+    // CPU fallback
+    tracing::info!("parakeet: loading {} on CPU", file_name);
+    Ok(Session::builder()?.commit_from_file(onnx_path)?)
 }
 
 /// Helper to extract f32 tensor from ort output as a raw shape + data.
