@@ -32,16 +32,23 @@ impl ParakeetEngine {
             .map_err(|e| Error::Download(e.to_string()))?;
         let model = api.model(repo.to_string());
 
-        let encoder_file = hf_get_with_retry(&model, "encoder-model.onnx", 3)
+        // Download int8 models first (preferred: self-contained, CoreML compatible)
+        let encoder_file = hf_get_with_retry(&model, "encoder-model.int8.onnx", 3)
+            .or_else(|_| hf_get_with_retry(&model, "encoder-model.onnx", 3))
             .map_err(|e| Error::Download(format!("encoder: {e}")))?;
         let model_dir = encoder_file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
 
-        // Download all required files
-        for f in &["decoder_joint-model.onnx", "vocab.txt"] {
-            hf_get_with_retry(&model, f, 3)
-                .map_err(|e| Error::Download(format!("{f}: {e}")))?;
+        // Download all required files (try int8 first, fallback to fp32)
+        for (int8, fp32) in &[
+            ("decoder_joint-model.int8.onnx", "decoder_joint-model.onnx"),
+        ] {
+            let _ = hf_get_with_retry(&model, int8, 3)
+                .or_else(|_| hf_get_with_retry(&model, fp32, 3))
+                .map_err(|e| Error::Download(format!("{fp32}: {e}")))?;
         }
-        // Try external weights (may not exist for int8)
+        hf_get_with_retry(&model, "vocab.txt", 3)
+            .map_err(|e| Error::Download(format!("vocab.txt: {e}")))?;
+        // Try external weights (needed for fp32 encoder, doesn't exist for int8)
         let _ = model.get("encoder-model.onnx.data");
 
         Self::from_dir(&model_dir).map(|mut e| {
@@ -52,8 +59,11 @@ impl ParakeetEngine {
 
     /// Load from a local directory containing ONNX files + vocab.txt.
     pub fn from_dir(dir: &Path) -> Result<Self> {
-        let encoder_path = find_file(dir, &["encoder-model.onnx", "encoder-model.int8.onnx"])?;
-        let decoder_path = find_file(dir, &["decoder_joint-model.onnx", "decoder_joint-model.int8.onnx"])?;
+        // Prefer int8 models: they're self-contained (no external .data files) and
+        // work with CoreML's MLProgram format for ANE acceleration.
+        // fp32 models with external data can't use CoreML due to ort limitations.
+        let encoder_path = find_file(dir, &["encoder-model.int8.onnx", "encoder-model.onnx"])?;
+        let decoder_path = find_file(dir, &["decoder_joint-model.int8.onnx", "decoder_joint-model.onnx"])?;
         let vocab_path = find_file(dir, &["vocab.txt"])?;
 
         let vocab = load_vocab(&vocab_path)?;
