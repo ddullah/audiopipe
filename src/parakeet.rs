@@ -89,86 +89,15 @@ impl ParakeetEngine {
 
 /// Build an ONNX session with the best available execution provider.
 ///
-/// On macOS with `coreml` feature:
-/// - Tries MLProgram format first (better ANE / op coverage), then NeuralNetwork
-/// - All compute units (CPU + GPU + ANE)
-/// - FastPrediction specialization (optimise for inference latency)
-/// - Model caching to avoid recompilation across runs
-/// - fp16 accumulation on GPU
+/// Parakeet uses CPU execution on macOS — benchmarks show it's 2x faster and
+/// uses 4x less memory than CoreML on Apple Silicon, because only ~44% of
+/// encoder ops are CoreML-compatible, and the CPU↔ANE data transfer overhead
+/// negates the acceleration benefit.
 ///
 /// On Windows with `directml` feature: tries DirectML for GPU acceleration.
 /// Falls back to CPU if no accelerator works.
 fn build_session_with_ep(onnx_path: &std::path::Path) -> Result<Session> {
     let file_name = onnx_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-
-    // --- CoreML (macOS / iOS) ---
-    //
-    // Models with external data (.onnx.data) can't use MLProgram format due to
-    // ort creating a temp directory that shadows the model file path. For these,
-    // we use NeuralNetwork format only, loaded from file (not memory, since
-    // memory loading loses the path context needed for external data).
-    //
-    // Models without external data get the full treatment: MLProgram first
-    // (better ANE coverage), NeuralNetwork fallback, with caching.
-    #[cfg(feature = "coreml")]
-    {
-        let has_external_data = onnx_path.with_extension("onnx.data").exists();
-        let cache_dir = onnx_path.parent().map(|p| p.join("coreml_cache"));
-
-        let formats: &[ort::ep::coreml::ModelFormat] = if has_external_data {
-            // External data: only NeuralNetwork works via commit_from_file
-            &[ort::ep::coreml::ModelFormat::NeuralNetwork]
-        } else {
-            // No external data: try MLProgram first (more ANE ops), then NeuralNetwork
-            &[
-                ort::ep::coreml::ModelFormat::MLProgram,
-                ort::ep::coreml::ModelFormat::NeuralNetwork,
-            ]
-        };
-
-        for format in formats {
-            let format_name = match format {
-                ort::ep::coreml::ModelFormat::MLProgram => "MLProgram",
-                ort::ep::coreml::ModelFormat::NeuralNetwork => "NeuralNetwork",
-            };
-
-            let mut ep = ort::ep::CoreML::default()
-                .with_model_format(*format)
-                .with_compute_units(ort::ep::coreml::ComputeUnits::All)
-                .with_specialization_strategy(ort::ep::coreml::SpecializationStrategy::FastPrediction)
-                .with_low_precision_accumulation_on_gpu(true);
-
-            if let Some(ref dir) = cache_dir {
-                let cache_sub = dir.join(format_name.to_lowercase());
-                let _ = std::fs::create_dir_all(&cache_sub);
-                ep = ep.with_model_cache_dir(cache_sub.to_string_lossy());
-            }
-
-            tracing::info!(
-                "parakeet: trying CoreML EP ({}, All compute units) for {}",
-                format_name, file_name
-            );
-
-            let result = (|| -> std::result::Result<Session, ort::Error> {
-                let mut builder = Session::builder()?;
-                builder = builder.with_execution_providers([ep.build()])?;
-                builder.commit_from_file(onnx_path)
-            })();
-
-            match result {
-                Ok(session) => {
-                    tracing::info!("parakeet: {} loaded with CoreML {} format", file_name, format_name);
-                    return Ok(session);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "parakeet: CoreML {} failed for {}: {}",
-                        format_name, file_name, e
-                    );
-                }
-            }
-        }
-    }
 
     // --- DirectML (Windows) ---
     #[cfg(feature = "directml")]
