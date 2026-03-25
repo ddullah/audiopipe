@@ -91,22 +91,17 @@ impl ParakeetEngine {
 fn build_session_with_ep(onnx_path: &std::path::Path) -> Result<Session> {
     let file_name = onnx_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
+    // Check if model has external data (e.g. encoder-model.onnx.data).
+    // Models with external data must be loaded from memory for CoreML because
+    // ort's CoreML EP creates a temp directory at the model file path, which
+    // shadows the .onnx file and breaks external data resolution.
+    let has_external_data = onnx_path.with_extension("onnx.data").exists();
+
     // --- CoreML (macOS / iOS) ---
     #[cfg(feature = "coreml")]
     {
-        // Check if model has external data (e.g. encoder-model.onnx.data)
-        // CoreML caching breaks with external data files, so skip cache in that case
-        let has_external_data = {
-            let data_path = onnx_path.with_extension("onnx.data");
-            data_path.exists()
-        };
-
         // Derive a stable cache directory next to the model file
-        let cache_dir = if has_external_data {
-            None // Skip caching — conflicts with external data path resolution
-        } else {
-            onnx_path.parent().map(|p| p.join("coreml_cache"))
-        };
+        let cache_dir = onnx_path.parent().map(|p| p.join("coreml_cache"));
 
         // Try MLProgram first (more ops on ANE), fall back to NeuralNetwork
         for format in &[
@@ -131,14 +126,23 @@ fn build_session_with_ep(onnx_path: &std::path::Path) -> Result<Session> {
             }
 
             tracing::info!(
-                "parakeet: trying CoreML EP ({}, All compute units) for {}",
-                format_name, file_name
+                "parakeet: trying CoreML EP ({}, All compute units{}) for {}",
+                format_name,
+                if has_external_data { ", from memory" } else { "" },
+                file_name
             );
 
             let result = (|| -> std::result::Result<Session, ort::Error> {
                 let mut builder = Session::builder()?;
                 builder = builder.with_execution_providers([ep.build()])?;
-                builder.commit_from_file(onnx_path)
+                if has_external_data {
+                    // Load into memory to avoid path conflicts with external data
+                    let model_bytes = std::fs::read(onnx_path)
+                        .map_err(|e| ort::Error::new(format!("read model: {e}")))?;
+                    builder.commit_from_memory(&model_bytes)
+                } else {
+                    builder.commit_from_file(onnx_path)
+                }
             })();
 
             match result {
