@@ -9,7 +9,7 @@ pub struct Model {
     inner: Box<dyn Engine + Send>,
 }
 
-/// Engine trait — implemented by each backend (Parakeet, Whisper, etc.).
+/// Engine trait — implemented by each backend (Parakeet, Whisper, HTTP, etc.).
 pub(crate) trait Engine: Send + Sync {
     fn transcribe(&mut self, audio: &[f32], sample_rate: u32, opts: &TranscribeOptions) -> Result<TranscribeResult>;
     fn name(&self) -> &str;
@@ -58,8 +58,33 @@ impl Model {
     /// - `"parakeet-tdt-0.6b-v3"` — NVIDIA Parakeet TDT (25 languages, 0.6B)
     /// - `"whisper-large-v3-turbo"` — OpenAI Whisper large-v3-turbo
     /// - `"whisper-tiny"` / `"whisper-small"` / etc.
+    /// - `"cf-nova-3"` — CF Workers AI nova-3 via HTTP (requires `http` feature)
+    /// - `"http:<endpoint>"` — Custom HTTP STT endpoint (requires `http` feature)
     pub fn from_pretrained(name: &str) -> Result<Self> {
         match name {
+            #[cfg(feature = "http")]
+            "cf-nova-3" => {
+                let account_id = std::env::var("CF_ACCOUNT_ID")
+                    .map_err(|_| Error::Http("CF_ACCOUNT_ID env var required for cf-nova-3".into()))?;
+                let gateway_id = std::env::var("CF_GATEWAY_ID")
+                    .unwrap_or_else(|_| "tigereye-inference".to_string());
+                let api_key = std::env::var("CF_API_TOKEN").ok();
+                let engine = crate::http::HttpEngine::cf_nova3(
+                    &account_id,
+                    &gateway_id,
+                    api_key.as_deref(),
+                );
+                Ok(Self { inner: Box::new(engine) })
+            }
+            #[cfg(feature = "http")]
+            n if n.starts_with("http:") => {
+                let endpoint = &n[5..];
+                let api_key = std::env::var("HTTP_STT_API_KEY").ok();
+                let model = std::env::var("HTTP_STT_MODEL")
+                    .unwrap_or_else(|_| "@cf/openai/whisper-large-v3-turbo".to_string());
+                let engine = crate::http::HttpEngine::new(endpoint, api_key.as_deref(), &model);
+                Ok(Self { inner: Box::new(engine) })
+            }
             #[cfg(feature = "parakeet-mlx")]
             n if n.contains("mlx") && n.starts_with("parakeet") => {
                 let base_name = n.replace("-mlx", "");
@@ -92,7 +117,7 @@ impl Model {
                 Ok(Self { inner: Box::new(engine) })
             }
             _ => Err(Error::ModelNotFound(format!(
-                "unknown model '{}'. available: parakeet-tdt-0.6b-v2, parakeet-tdt-0.6b-v3, qwen3-asr-0.6b, whisper-*",
+                "unknown model '{}'. available: parakeet-tdt-0.6b-v2, parakeet-tdt-0.6b-v3, qwen3-asr-0.6b, whisper-*, cf-nova-3, http:<endpoint>",
                 name
             ))),
         }
