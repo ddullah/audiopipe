@@ -116,11 +116,12 @@ impl Engine for HttpEngine {
 
         let content_type = format!("multipart/form-data; boundary={}", boundary);
 
-        // Use ureq for blocking HTTP (no async runtime needed)
-        let mut request = ureq::post(&self.endpoint).header("Content-Type", &content_type);
+        // Use ureq v2 for blocking HTTP (no async runtime needed)
+        let mut request = ureq::post(&self.endpoint)
+            .set("Content-Type", &content_type);
 
         if let Some(ref key) = self.api_key {
-            request = request.header("Authorization", &format!("Bearer {}", key));
+            request = request.set("Authorization", &format!("Bearer {}", key));
         }
 
         let response = request
@@ -128,8 +129,7 @@ impl Engine for HttpEngine {
             .map_err(|e| Error::Http(format!("HTTP request failed: {}", e)))?;
 
         let response_body = response
-            .into_body()
-            .read_to_string()
+            .into_string()
             .map_err(|e| Error::Http(format!("failed to read response: {}", e)))?;
 
         // Parse CF Workers AI response: {"result": {"text": "..."}} or OpenAI format {"text": "..."}
@@ -145,11 +145,11 @@ impl Engine for HttpEngine {
             .to_string();
 
         Ok(TranscribeResult {
-            text,
+            text: text.clone(),
             segments: vec![Segment {
                 start_secs: 0.0,
                 end_secs: audio.len() as f64 / sample_rate as f64,
-                text: text.clone(),
+                text,
             }],
         })
     }
