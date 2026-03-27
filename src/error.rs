@@ -20,6 +20,9 @@ pub enum Error {
     #[error("decode error: {0}")]
     Decode(String),
 
+    #[error("http error: {0}")]
+    Http(String),
+
     #[error("{0}")]
     Other(String),
 }
