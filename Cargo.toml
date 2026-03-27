@@ -1,10 +1,10 @@
 [package]
 name = "audiopipe"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Fast speech-to-text inference in Rust. Metal, Vulkan, CUDA, CoreML, DirectML."
+description = "Fast speech-to-text inference in Rust. Metal, Vulkan, CUDA, CoreML, DirectML, HTTP."
 license = "MIT"
-repository = "https://github.com/screenpipe/audiopipe"
+repository = "https://github.com/ddullah/audiopipe"
 keywords = ["speech-to-text", "asr", "whisper", "parakeet", "onnx"]
 categories = ["multimedia::audio", "science"]
 
@@ -24,6 +24,7 @@ safetensors = { version = "0.4", optional = true }
 whisper-rs = { version = "0.15", optional = true }
 qwen3-asr-sys = { path = "crates/qwen3-asr-sys", optional = true }
 antirez-asr-sys = { path = "crates/antirez-asr-sys", optional = true }
+ureq = { version = "3", optional = true }
 
 [dev-dependencies]
 hound = "3"
@@ -68,6 +69,9 @@ qwen3-asr-antirez = ["dep:antirez-asr-sys"]
 qwen3-asr-antirez-blas = ["qwen3-asr-antirez", "antirez-asr-sys/openblas"]
 parakeet-mlx = ["dep:mlx-rs", "dep:safetensors", "dep:half"]
 all-models = ["whisper", "parakeet", "qwen3-asr"]
+
+# HTTP engine — remote STT via CF Workers AI or any OpenAI-compatible endpoint
+http = ["dep:ureq"]
 
 # GGML GPU backends
 metal = ["qwen3-asr-ggml", "qwen3-asr-sys/metal"]
